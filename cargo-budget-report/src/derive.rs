@@ -147,8 +147,7 @@ pub struct TierBMeasurement {
     pub value: u64,
 }
 
-/// One row of the source Tier B JSON after we accept both the bare
-/// array and the `{schema_version, snapshots}` wrapped forms.
+#[cfg(test)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum TierBReportShape {
@@ -161,6 +160,7 @@ enum TierBReportShape {
     Bare(Vec<TierBMeasurement>),
 }
 
+#[cfg(test)]
 fn default_schema_version() -> u32 {
     1
 }
@@ -183,15 +183,14 @@ pub fn load_tier_b_report(path: &Path) -> Result<Vec<TierBMeasurement>> {
         std::fs::read_to_string(path)
             .map_err(|e| Error::Message(format!("failed to read {}: {e}", path.display())))?
     };
-    let parsed: TierBReportShape = serde_json::from_str(&contents).map_err(|e| {
-        Error::Message(format!(
-            "failed to parse Tier B JSON as either {{\"schema_version\":..., \"snapshots\":[...]}} or a bare array: {e}"
-        ))
-    })?;
-    Ok(match parsed {
-        TierBReportShape::Wrapped { snapshots, .. } => snapshots,
-        TierBReportShape::Bare(items) => items,
-    })
+    let value: serde_json::Value = serde_json::from_str(&contents).map_err(Error::Json)?;
+    let snapshots_opt = crate::json_output::validate_report_schema(&value, path)?;
+    let measurements: Vec<TierBMeasurement> = match snapshots_opt {
+        Some(snapshots) => serde_json::from_value(serde_json::Value::Array(snapshots.clone()))
+            .map_err(Error::Json)?,
+        None => serde_json::from_value(value).map_err(Error::Json)?,
+    };
+    Ok(measurements)
 }
 
 /// One row of the output env file. Each row records both the
@@ -850,5 +849,129 @@ mod tests {
         for (label, expected) in table {
             assert_eq!(m.for_metric(label), Some(expected));
         }
+    }
+
+    #[test]
+    fn load_tier_b_report_accepts_version_1_and_bare_array() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let wrapped = serde_json::json!({
+            "schema_version": 1,
+            "snapshots": [
+                {"package": "p", "function": "f", "metric": "CPU Instructions", "value": 1000}
+            ]
+        });
+        std::fs::write(tmp.path(), wrapped.to_string()).unwrap();
+        let reports = load_tier_b_report(tmp.path()).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].package, "p");
+
+        let bare = serde_json::json!([
+            {"package": "p", "function": "f", "metric": "Read Bytes", "value": 500}
+        ]);
+        std::fs::write(tmp.path(), bare.to_string()).unwrap();
+        let bare_reports = load_tier_b_report(tmp.path()).unwrap();
+        assert_eq!(bare_reports.len(), 1);
+        assert_eq!(bare_reports[0].value, 500);
+    }
+
+    #[test]
+    fn load_tier_b_report_rejects_unsupported_version() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let bad_json = serde_json::json!({
+            "schema_version": 2,
+            "snapshots": []
+        });
+        std::fs::write(tmp.path(), bad_json.to_string()).unwrap();
+        let err = load_tier_b_report(tmp.path()).unwrap_err();
+        assert_eq!(err.exit_code(), crate::error::EXIT_CONFIG_ERROR);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported schema_version 2 in"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("accepted versions are [1]"), "got: {msg}");
+    }
+
+    #[test]
+    fn load_tier_b_report_accepts_writer_render_json_round_trip() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cost_report = crate::CostReport {
+            package: "my-pkg".to_string(),
+            function: "my_fn".to_string(),
+            metric: "CPU Instructions",
+            value: Some(42000),
+            limit: None,
+            pass: None,
+        };
+        let rendered = crate::json_output::render_json(&[cost_report]);
+        std::fs::write(tmp.path(), rendered).unwrap();
+        let loaded = load_tier_b_report(tmp.path())
+            .expect("writer output must be accepted by load_tier_b_report");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].package, "my-pkg");
+        assert_eq!(loaded[0].function, "my_fn");
+        assert_eq!(loaded[0].value, 42000);
+    }
+
+    // -- build_profile rendering in env file and provenance markdown ------
+
+    fn derivation() -> Derivation {
+        Derivation::default()
+    }
+
+    #[test]
+    fn render_env_file_emits_profile_line_for_some_profile() {
+        let out = derivation().render_env_file(
+            "test-source.json",
+            &margin(),
+            Some("release-opt"),
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(
+            out.contains("Build profile of source WASM: release-opt"),
+            "env file should include profile line for Some(profile), got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_env_file_omits_profile_line_for_none() {
+        let out = derivation().render_env_file(
+            "test-source.json",
+            &margin(),
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(
+            !out.contains("Build profile of source WASM"),
+            "env file must not include profile line for None, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_provenance_markdown_emits_profile_line_for_some_profile() {
+        let out = derivation().render_provenance_markdown(
+            "test-source.json",
+            &margin(),
+            Some("release-opt"),
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(
+            out.contains("- Build profile of source WASM: `release-opt`"),
+            "provenance markdown should include profile line for Some(profile), got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_provenance_markdown_omits_profile_line_for_none() {
+        let out = derivation().render_provenance_markdown(
+            "test-source.json",
+            &margin(),
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(
+            !out.contains("Build profile of source WASM"),
+            "provenance markdown must not include profile line for None, got:\n{out}"
+        );
     }
 }

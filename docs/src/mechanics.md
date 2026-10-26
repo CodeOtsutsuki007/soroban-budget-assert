@@ -99,7 +99,7 @@ sequenceDiagram
     participant Report as Budget Report
 
     Dev->>CLI: cargo budget-report [--check] [--json]
-    CLI->>Cargo: cargo build -p <contract> --release<br/>--target wasm32-unknown-unknown
+    CLI->>Cargo: cargo build -p <contract> --release<br/>--target wasm32v1-none
     Cargo-->>WASM: amm_pool_contract.wasm (cdylib)
 
     CLI->>Parser: wasmparser: scan exports
@@ -126,8 +126,14 @@ sequenceDiagram
     CLI->>Report: Render table (tabled) or<br/>emit JSON (--json flag)
     Report-->>Dev: Console output +<br/>current_report.json artifact
 
-    alt Any limit breached or simulation failed
-        CLI-->>Dev: exit code 1 (CI fails)
+    alt Any --check-baseline regression beyond tolerance
+        CLI-->>Dev: exit code 5 (CI fails)
+    else Any --check limit breached
+        CLI-->>Dev: exit code 4 (CI fails)
+    else --validate decode mismatch
+        CLI-->>Dev: exit code 1 (generic failure, CI fails)
+    else Simulation produced no metrics or network fault
+        CLI-->>Dev: exit code 6 (CI fails)
     else All checks pass
         CLI-->>Dev: exit code 0 (CI passes)
     end
