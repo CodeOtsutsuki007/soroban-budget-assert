@@ -58,6 +58,16 @@ pub(crate) fn validate_report_schema<'a>(
         return Ok(None);
     }
     if let Some(obj) = root.as_object() {
+        for key in obj.keys() {
+            if key != "schema_version" && key != "snapshots" {
+                return Err(Error::Json(serde::de::Error::custom(format!(
+                    "unrecognized top-level key `{}` in report {}; allowed top-level keys are `schema_version` and `snapshots`",
+                    key,
+                    path.display()
+                ))));
+            }
+        }
+
         let version_val = match obj.get("schema_version") {
             Some(v) => v,
             None => {
@@ -405,5 +415,33 @@ mod tests {
             "got: {msg}"
         );
         assert!(msg.contains("accepted versions are [1]"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_report_schema_rejects_unknown_top_level_keys_and_typos() {
+        let val = serde_json::json!({
+            "schema_version": 1,
+            "snapshot": []
+        });
+        let err = validate_report_schema(&val, Path::new("malformed.json")).unwrap_err();
+        assert_eq!(err.exit_code(), crate::error::EXIT_CONFIG_ERROR);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unrecognized top-level key `snapshot` in malformed.json"),
+            "got: {msg}"
+        );
+
+        let val2 = serde_json::json!({
+            "schema_version": 1,
+            "snapshots": [],
+            "extra_key": true
+        });
+        let err2 = validate_report_schema(&val2, Path::new("extra.json")).unwrap_err();
+        assert_eq!(err2.exit_code(), crate::error::EXIT_CONFIG_ERROR);
+        let msg2 = err2.to_string();
+        assert!(
+            msg2.contains("unrecognized top-level key `extra_key` in extra.json"),
+            "got: {msg2}"
+        );
     }
 }

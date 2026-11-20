@@ -23,6 +23,9 @@ fn test_all_schema_rejection_branches_name_accepted_versions() {
         ),
     ];
 
+    let mut test_cases = test_cases.to_vec();
+    test_cases.push(("misspelled_snapshots", r#"{"schema_version": 1, "snapshot": []}"#));
+
     for (name, json_content) in test_cases {
         let file_path = dir.path().join(format!("{name}.json"));
         fs::write(&file_path, json_content).expect("failed to write test file");
@@ -46,10 +49,17 @@ fn test_all_schema_rejection_branches_name_accepted_versions() {
 
         let output = assert.failure().get_output().clone();
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if name == "misspelled_snapshots" {
         assert!(
+                stderr.contains("unrecognized top-level key `snapshot`"),
+                "case '{name}' should report unrecognized key in stderr, got:\n{stderr}"
+            );
+        } else {
+            assert!(
             stderr.contains("accepted versions are [1]")
                 || stderr.contains("accepted versions are"),
             "case '{name}' should report accepted versions in stderr, got:\n{stderr}"
         );
+        }
     }
 }
